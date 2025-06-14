@@ -1,0 +1,309 @@
+<script setup>
+import { computed, onMounted, ref, readonly, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import SortingBox from "./SortingBox.vue";
+import SaleItemCard from "./SaleItemCard.vue";
+import { getProductPagnation } from "../../api/productApi.js";
+import SaleItemsPagination from "./SaleItemsPagination.vue";
+import SaleItemsHeader from "./SaleItemsHeader.vue";
+
+const route = useRoute();
+const router = useRouter();
+const PageData = ref({});
+const Product = ref([]);
+const saleItemSuccessMessage = ref("");
+const navigateToAddItem = () => {
+  router.push("/sale-items/add");
+};
+// localStorage key
+const STORAGE_KEY = 'saleItems_filters';
+
+// Load saved state from localStorage
+const loadFromStorage = () => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return saved ? JSON.parse(saved) : {};
+  } catch (error) {
+    console.error('Error loading from localStorage:', error);
+    return {};
+  }
+};
+
+// Save state to localStorage
+const saveToStorage = (data) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (error) {
+    console.error('Error saving to localStorage:', error);
+  }
+};
+
+// Initialize states with priority: URL > localStorage > defaults
+const initializeState = () => {
+  const saved = loadFromStorage();
+
+  return {
+    page: parseInt(route.query.page) || 0,
+    pageSize: parseInt(route.query.size) || saved.pageSize || 10,
+    sortField: route.query.sortField || saved.sortField || 'createdOn',
+    sortDirection: route.query.sortDirection || saved.sortDirection || 'asc',
+    selectedBrands: Array.isArray(route.query.filterBrands)
+        ? route.query.filterBrands
+        : route.query.filterBrands
+            ? [route.query.filterBrands]
+            : saved.selectedBrands || []
+  };
+};
+
+const initialState = initializeState();
+
+// Sorting state - initialize from URL params with localStorage fallback
+const page = ref(initialState.page);
+const pageSize = ref(initialState.pageSize);
+const sortField = ref(initialState.sortField);
+const sortDirection = ref(initialState.sortDirection);
+
+// Brand filtering state - initialize from URL parameters with localStorage fallback
+const selectedBrands = ref(initialState.selectedBrands);
+
+const selectedProduct = computed(() => {
+  return Product.value.length;
+});
+
+// Save current state to localStorage
+const saveCurrentState = () => {
+  const currentState = {
+    pageSize: pageSize.value,
+    sortField: sortField.value,
+    sortDirection: sortDirection.value,
+    selectedBrands: selectedBrands.value
+  };
+  saveToStorage(currentState);
+};
+
+// Clean async/await function to fetch products with current parameters
+const fetchProducts = async () => {
+  try {
+    // Use clean async/await pattern
+    const response = await getProductPagnation(
+        selectedBrands.value,
+        pageSize.value,
+        page.value,
+        sortDirection.value,
+        sortField.value
+    );
+
+    // Store full response for pagination info
+    PageData.value = response;
+    // Extract just the products array with fallback
+    Product.value = response.content || [];
+
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    // Reset data on error to prevent stale state
+    PageData.value = {};
+    Product.value = [];
+  }
+};
+
+// Function to update URL with current state
+const updateURL = (resetPage = false) => {
+  const query = {};
+
+  // Only add non-default values to URL
+  if (pageSize.value !== 10) {
+    query.size = pageSize.value.toString();
+  }
+
+  if (sortDirection.value !== 'asc' || sortField.value !== 'createdOn') {
+    query.sortDirection = sortDirection.value;
+    query.sortField = sortField.value;
+  }
+
+  if (selectedBrands.value.length > 0) {
+    query.filterBrands = selectedBrands.value;
+  }
+
+  // Handle pagination
+  if (resetPage) {
+    page.value = 0;
+  } else if (page.value > 0) {
+    query.page = page.value.toString();
+  }
+
+  // Only update if query actually changed
+  const currentQuery = JSON.stringify(route.query);
+  const newQuery = JSON.stringify(query);
+
+  if (currentQuery !== newQuery) {
+    router.push({ query });
+  }
+};
+
+// Handle brand filter changes
+const handleFilterChange = async (brands) => {
+  selectedBrands.value = brands;
+  page.value = 0;
+
+  saveCurrentState();
+  await fetchProducts();
+  updateURL(true);
+};
+
+// Handle sorting changes
+const handleSortChange = async (field, direction) => {
+  sortField.value = field;
+  sortDirection.value = direction;
+  page.value = 0;
+
+  saveCurrentState();
+  await fetchProducts();
+  updateURL(true);
+};
+
+// Handle page size change
+const handlePageSizeChange = async (newSize) => {
+  pageSize.value = newSize;
+  page.value = 0;
+
+  saveCurrentState();
+  await fetchProducts();
+  updateURL(true);
+};
+
+// Handle page change
+const handlePageChange = async (newPage) => {
+  if (newPage === 'first') {
+    page.value = 0;
+  } else if (newPage === 'last') {
+    page.value = Math.max((PageData.value.totalPages || 1) - 1, 0);
+  } else if (newPage === 'next') {
+    page.value = Math.min(page.value + 1, Math.max((PageData.value.totalPages || 1) - 1, 0));
+  } else if (newPage === 'previous') {
+    page.value = Math.max(page.value - 1, 0);
+  } else {
+    page.value = newPage;
+  }
+
+  // Note: We don't save page to localStorage as it's navigation state
+  await fetchProducts();
+  updateURL(false);
+};
+
+// Watch for URL changes and sync state - only handle direct URL navigation
+watch(() => route.query, async (newQuery, oldQuery) => {
+  if (!oldQuery) return;
+
+  // Check if this change came from user navigation (not our programmatic update)
+  const isUserNavigation = JSON.stringify(oldQuery) !== JSON.stringify(route.query);
+  if (!isUserNavigation) return;
+
+  const newPage = parseInt(newQuery.page) || 0;
+  const newPageSize = parseInt(newQuery.size) || 10;
+  const newSortField = newQuery.sortField || 'createdOn';
+  const newSortDirection = newQuery.sortDirection || 'asc';
+  const newBrands = Array.isArray(newQuery.filterBrands)
+      ? newQuery.filterBrands
+      : newQuery.filterBrands
+          ? [newQuery.filterBrands]
+          : [];
+
+  page.value = newPage;
+  pageSize.value = newPageSize;
+  sortField.value = newSortField;
+  sortDirection.value = newSortDirection;
+  selectedBrands.value = newBrands;
+
+  saveCurrentState();
+  await fetchProducts();
+}, {deep: true});
+
+// Expose functions for parent components
+defineExpose({
+  handleFilterChange,
+  selectedBrands: readonly(selectedBrands)
+});
+
+onMounted(async () => {
+  // Clean up URL if we have default values
+  const query = {...route.query};
+  let needsCleanup = false;
+
+  // Remove default values from URL
+  if (query.size === '10') {
+    delete query.size;
+    needsCleanup = true;
+  }
+
+  if (query.sortDirection === 'asc' && query.sortField === 'createdOn') {
+    delete query.sortDirection;
+    delete query.sortField;
+    needsCleanup = true;
+  }
+
+  if (needsCleanup) {
+    router.replace({query});
+  }
+
+  // If we loaded from localStorage but URL is clean, update URL
+  const hasNonDefaultState =
+      pageSize.value !== 10 ||
+      sortField.value !== 'createdOn' ||
+      sortDirection.value !== 'asc' ||
+      selectedBrands.value.length > 0;
+
+  if (hasNonDefaultState && !route.query.size && !route.query.sortField && !route.query.filterBrands) {
+    updateURL();
+  }
+
+  await fetchProducts();
+});
+</script>
+
+<template>
+  <div class="flex flex-col w-full">
+
+    <div class="flex flex-row justify-between items-baseline w-full p-4">
+      <SaleItemsHeader class="itbms-sale-item-add justify-items-start"
+                       :successMessageType="saleItemSuccessMessage"
+                       :useRouteQuery="true"
+                       addButtonText="+ New Sale Items"
+                       addButtonRoute="/sale-items/add"
+                       @add-button-click="navigateToAddSaleItem"
+      />
+      <p>Selected Product : {{ selectedProduct }}</p>
+
+      <SortingBox
+          :selectedSize="pageSize"
+          :sortField="sortField"
+          :sortDirection="sortDirection"
+          @update:selectedSize="handlePageSizeChange"
+          @update:sortField="(field) => handleSortChange(field, sortDirection)"
+          @update:sortDirection="(direction) => handleSortChange(sortField, direction)"
+      />
+    </div>
+
+    <div>
+      <p
+          v-show="Product.length === 0"
+          class="itbms-* text-center text-gray-500"
+      >
+        No sale item
+      </p>
+      <div class="grid grid-cols-5 gap-4 p-4">
+        <SaleItemCard
+            class="itbms-row"
+            v-for="item in Product"
+            :id="item.id"
+            :key="item.id"
+            :brand="item.brandName"
+            :model="item.model"
+            :ramGb="item.ramGb"
+            :storage="item.storageGb"
+            :price="item.price"
+        />
+      </div>
+    </div>
+    <SaleItemsPagination @page-change="handlePageChange" :page="page" :total-pages="PageData.totalPages"/>
+  </div>
+</template>
